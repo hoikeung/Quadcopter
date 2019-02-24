@@ -1,0 +1,343 @@
+
+ 
+#include "kalman.h"
+#include <math.h>
+#include "sys.h"
+
+
+
+
+
+void kalman_1(struct _1_ekf_filter *ekf,float input)  
+{
+	ekf->Now_P = ekf->LastP + ekf->Q;
+	ekf->Kg = ekf->Now_P / (ekf->Now_P + ekf->R);
+	ekf->out = ekf->out + ekf->Kg * (input - ekf->out);
+	ekf->LastP = (1-ekf->Kg) * ekf->Now_P ;
+}
+
+
+
+
+
+float kalman_2_Update(float InputAngle,float InputGyro,float dt)  
+{
+	struct Kalman{
+		float k_1_k_1;//(k-1|k-1)
+		float k_k_1;  //(k|k-1)
+		float k_k;    //(k|k)
+	};
+	static struct Kalman X={0};
+		
+	const float R_angle=0.5; 
+	const float h_0=1; 
+	const float Q_angle=0.001;  
+	const float Q_gyro=0.001;	
+		
+	static float P[2][2];
+	float k_0,k_1;
+	float t0,t1;
+	float PHt_0;
+	float PHt_1;
+	float Pdot[4];	
+	float E;
+
+	
+	
+	static float Q_bias; 
+	X.k_k_1 = X.k_1_k_1 + (InputGyro - Q_bias) * dt; 
+
+// P(k|k-1)=A P(k-1|k-1) A'
+
+	Pdot[0]=Q_angle - P[0][1] - P[1][0]; 
+
+	Pdot[1]= - P[1][1];
+
+	Pdot[2]= - P[1][1];
+
+	Pdot[3]= Q_gyro;
+
+	P[0][0] += Pdot[0] * dt;
+
+	P[0][1] += Pdot[1] * dt;
+
+	P[1][0] += Pdot[2] * dt;
+
+	P[1][1] += Pdot[3] * dt;
+
+
+/*
+* Update covariance matrix:
+* (equation 21-3)
+*
+* P = P - K H P
+* Let
+* Y = H P
+
+*/
+//Kg(k)= P(k|k-1) H'/ (H P(k|k-1) H' + R) 
+	PHt_0 = h_0 * P[0][0];
+
+	PHt_1 = h_0 * P[1][0];
+
+	E = R_angle + h_0 * PHt_0;
+
+	k_0 = PHt_0 / E;
+
+	k_1 = PHt_1 / E;
+//---------------------------------	
+//PP(k|k)=(I-Kg(k) H)P(k|k-1)	
+
+	t0 = PHt_0;
+
+	t1 = h_0 * P[0][1];
+
+	P[0][0] -= k_0 * t0;
+
+	P[0][1] -= k_0 * t1;
+
+	P[1][0] -= k_1 * t0;
+
+	P[1][1] -= k_1 * t1;
+
+//---------------------------------	
+	
+/*
+* Update our state estimate: *
+
+* Xnew = X + K * error
+
+* X(k|k)= X(k|k-1)+Kg(k) (Z(k)-X(k|k-1)) 
+*/
+
+	X.k_k = X.k_k_1 + k_0 * (InputAngle - X.k_k_1);
+
+	Q_bias = Q_bias + k_1 * (InputAngle - X.k_k_1);
+	
+
+	X.k_1_k_1 = X.k_k; 
+	
+	return X.k_k;
+}
+
+
+
+
+typedef struct{
+	float x;
+	float p;
+	float A;
+	float H;
+	float q;
+	float r;
+	float gain;
+}kalman1_state;
+
+typedef struct{
+	float x[2];
+	float p[2][2];
+	float A[2][2];
+	float H[2];
+	float q[2];
+	float r;
+	float gain[2];
+}kalman2_state;
+
+
+
+void kalman1_init(kalman1_state *state, float init_x, float init_p)
+{
+    state->x = init_x;
+    state->p = init_p;
+    state->A = 1;
+    state->H = 1;
+    state->q = 2e2;//10e-6;  /* predict noise convariance */
+    state->r = 5e2;//10e-5;  /* measure error convariance */
+}
+
+
+
+float kalman1_filter(kalman1_state *state, float z_measure)
+{
+    /* Predict */
+    state->x = state->A * state->x;
+    state->p = state->A * state->A * state->p + state->q;  /* p(n|n-1)=A^2*p(n-1|n-1)+q */
+
+    /* Measurement */
+    state->gain = state->p * state->H / (state->p * state->H * state->H + state->r);
+    state->x = state->x + state->gain * (z_measure - state->H * state->x);
+    state->p = (1 - state->gain * state->H) * state->p;
+
+    return state->x;
+}
+
+
+
+
+void kalman2_init(kalman2_state *state, float *init_x, float (*init_p)[2])
+{
+    state->x[0]    = init_x[0];
+    state->x[1]    = init_x[1];
+    state->p[0][0] = init_p[0][0];
+    state->p[0][1] = init_p[0][1];
+    state->p[1][0] = init_p[1][0];
+    state->p[1][1] = init_p[1][1];
+    //state->A       = {{1, 0.1}, {0, 1}};
+    state->A[0][0] = 1;
+    state->A[0][1] = 0.1;
+    state->A[1][0] = 0;
+    state->A[1][1] = 1;
+    //state->H       = {1,0};
+    state->H[0]    = 1;
+    state->H[1]    = 0;
+    //state->q       = {{10e-6,0}, {0,10e-6}};  /* measure noise convariance */
+    state->q[0]    = 10e-7;
+    state->q[1]    = 10e-7;
+    state->r       = 10e-7;  /* estimated error convariance */
+}
+
+
+
+
+float kalman2_filter(kalman2_state *state, float z_measure)
+{
+    float temp0;
+    float temp1;
+    float temp;
+
+    /* Step1: Predict */
+    state->x[0] = state->A[0][0] * state->x[0] + state->A[0][1] * state->x[1];
+    state->x[1] = state->A[1][0] * state->x[0] + state->A[1][1] * state->x[1];
+    /* p(n|n-1)=A^2*p(n-1|n-1)+q */
+    state->p[0][0] = state->A[0][0] * state->p[0][0] + state->A[0][1] * state->p[1][0] + state->q[0];
+    state->p[0][1] = state->A[0][0] * state->p[0][1] + state->A[1][1] * state->p[1][1];
+    state->p[1][0] = state->A[1][0] * state->p[0][0] + state->A[0][1] * state->p[1][0];
+    state->p[1][1] = state->A[1][0] * state->p[0][1] + state->A[1][1] * state->p[1][1] + state->q[1];
+
+    /* Step2: Measurement */
+    /* gain = p * H^T * [r + H * p * H^T]^(-1), H^T means transpose. */
+    temp0 = state->p[0][0] * state->H[0] + state->p[0][1] * state->H[1];
+    temp1 = state->p[1][0] * state->H[0] + state->p[1][1] * state->H[1];
+    temp  = state->r + state->H[0] * temp0 + state->H[1] * temp1;
+    state->gain[0] = temp0 / temp;
+    state->gain[1] = temp1 / temp;
+    /* x(n|n) = x(n|n-1) + gain(n) * [z_measure - H(n)*x(n|n-1)]*/
+    temp = state->H[0] * state->x[0] + state->H[1] * state->x[1];
+    state->x[0] = state->x[0] + state->gain[0] * (z_measure - temp); 
+    state->x[1] = state->x[1] + state->gain[1] * (z_measure - temp);
+
+    /* Update @p: p(n|n) = [I - gain * H] * p(n|n-1) */
+    state->p[0][0] = (1 - state->gain[0] * state->H[0]) * state->p[0][0];
+    state->p[0][1] = (1 - state->gain[0] * state->H[1]) * state->p[0][1];
+    state->p[1][0] = (1 - state->gain[1] * state->H[0]) * state->p[1][0];
+    state->p[1][1] = (1 - state->gain[1] * state->H[1]) * state->p[1][1];
+
+    return state->x[0];
+}
+
+
+
+float dtTimer   = 0.008;
+float xk[9] = {0,0,0,0,0,0,0,0,0};
+float pk[9] = {1,0,0,0,1,0,0,0,0};
+float I[9]  = {1,0,0,0,1,0,0,0,1};
+float R[9]  = {0.5,0,0,0,0.5,0,0,0,0.01};
+float Q[9] = {0.005,0,0,0,0.005,0,0,0,0.001};
+ 
+void matrix_add(float* mata,float* matb,float* matc){
+    uint8_t i,j;
+    for (i=0; i<3; i++){
+       for (j=0; j<3; j++){
+          matc[i*3+j] = mata[i*3+j] + matb[i*3+j];
+       }
+    }
+}
+ 
+void matrix_sub(float* mata,float* matb,float* matc){
+    uint8_t i,j;
+    for (i=0; i<3; i++){
+       for (j=0; j<3; j++){
+          matc[i*3+j] = mata[i*3+j] - matb[i*3+j];
+       }
+    }
+}
+ 
+void matrix_multi(float* mata,float* matb,float* matc){
+  uint8_t i,j,m;
+  for (i=0; i<3; i++)
+  {
+    for (j=0; j<3; j++)
+   {
+      matc[i*3+j]=0.0;
+      for (m=0; m<3; m++)
+     {
+        matc[i*3+j] += mata[i*3+m] * matb[m*3+j];
+      }
+    }
+ }
+}
+ 
+void KalmanFilter(float* am_angle_mat,float* gyro_angle_mat)
+{
+		uint8_t i,j;
+		float yk[9];
+		float pk_new[9];
+		float K[9];
+		float KxYk[9];
+		float I_K[9];
+		float S[9];
+		float S_invert[9];
+		float sdet;
+		 
+		//xk = xk + uk
+		matrix_add(xk,gyro_angle_mat,xk);
+		//pk = pk + Q
+		matrix_add(pk,Q,pk);
+		//yk =  xnew - xk
+		matrix_sub(am_angle_mat,xk,yk);
+		//S=Pk + R
+		matrix_add(pk,R,S);
+		//S??invert
+		sdet = S[0] * S[4] * S[8]
+							+ S[1] * S[5] * S[6]
+							+ S[2] * S[3] * S[7]
+							- S[2] * S[4] * S[6]
+							- S[5] * S[7] * S[0]
+							- S[8] * S[1] * S[3];
+		 
+		S_invert[0] = (S[4] * S[8] - S[5] * S[7])/sdet;
+		S_invert[1] = (S[2] * S[7] - S[1] * S[8])/sdet;
+		S_invert[2] = (S[1] * S[7] - S[4] * S[6])/sdet;
+		 
+		S_invert[3] = (S[5] * S[6] - S[3] * S[8])/sdet;
+		S_invert[4] = (S[0] * S[8] - S[2] * S[6])/sdet;
+		S_invert[5] = (S[2] * S[3] - S[0] * S[5])/sdet;
+		 
+		S_invert[6] = (S[3] * S[7] - S[4] * S[6])/sdet;
+		S_invert[7] = (S[1] * S[6] - S[0] * S[7])/sdet;
+		S_invert[8] = (S[0] * S[4] - S[1] * S[3])/sdet;
+		//K = Pk * S_invert
+		matrix_multi(pk,S_invert,K);
+		//KxYk = K * Yk
+		matrix_multi(K,yk,KxYk);
+		//xk = xk + K * yk
+		matrix_add(xk,KxYk,xk);
+		//pk = (I - K)*(pk)
+		matrix_sub(I,K,I_K);
+		matrix_multi(I_K,pk,pk_new);
+		//update pk
+		//pk = pk_new;
+		for (i=0; i<3; i++)
+		{
+				for (j=0; j<3; j++)
+				{
+						pk[i*3+j] = pk_new[i*3+j];
+				}
+		}
+}
+
+
+
+
+
+
